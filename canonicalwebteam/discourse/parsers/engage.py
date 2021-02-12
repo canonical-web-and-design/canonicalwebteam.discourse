@@ -36,15 +36,17 @@ class EngageParser(BaseParser):
             raw_index_soup, self.url_prefix, self.index_topic_id, "Metadata"
         )
 
-        # Avoid markdown error to break site
-        try:
-            # Parse list of topics
-            self.metadata = self._parse_metadata(raw_index_soup, "Metadata")
-            self.takeovers = self._parse_metadata(raw_index_soup, "Takeovers")
-        except IndexError:
-            self.metadata = []
-            self.takeovers = []
-            self.warnings.append("Failed to parse metadata correctly")
+        engage_metadata, engage_errors = self._parse_engage_metadata(
+            raw_index_soup, "Metadata"
+        )
+        self.metadata = engage_metadata
+        self.engage_page_errors = engage_errors
+
+        takeovers_metadata, takeovers_errors = self._parse_engage_metadata(
+            raw_index_soup, "Takeovers"
+        )
+        self.takeovers = takeovers_metadata
+        self.takeovers_errors = takeovers_errors
 
         if index_topic["id"] != self.index_topic_id:
             # Get body and navigation HTML
@@ -120,7 +122,6 @@ class EngageParser(BaseParser):
             ),
             "related": current_topic_related,
             "topic_path": topic_path,
-            "errors": warnings,
         }
 
     def resolve_path(self, relative_path):
@@ -155,3 +156,99 @@ class EngageParser(BaseParser):
         """
         index_list = [item for item in self.metadata if item["tags"] in tags]
         return index_list
+
+    def _parse_engage_metadata(self, index_soup, section_name):
+        """
+        Given the HTML soup of an index topic
+        extract the metadata from the name designated
+        by section_name
+
+        This section_name section should contain a table
+        (extra markup around this table doesn't matter)
+        e.g.:
+
+        <h1>Metadata</h1>
+        <details>
+            <summary>Mapping table</summary>
+            <table>
+            <tr><th>Column 1</th><th>Column 2</th></tr>
+            <tr>
+                <td>data 1</td>
+                <td>data 2</td>
+            </tr>
+            <tr>
+                <td>data 3</td>
+                <td>data 4</td>
+            </tr>
+            </table>
+        </details>
+
+        This will typically be generated in Discourse from Markdown similar to
+        the following:
+
+        # Redirects
+
+        [details=Mapping table]
+        | Column 1| Column 2|
+        | -- | -- |
+        | data 1 | data 2 |
+        | data 3 | data 4 |
+
+        The function will return a list of dictionaries of this format:
+        [
+            {"column-1": "data 1", "column-2": "data 2"},
+            {"column-1": "data 3", "column-2": "data 4"},
+        ]
+        """
+        metadata_soup = self._get_section(index_soup, section_name)
+
+        topics_metadata = []
+        metadata_errors = []
+        if metadata_soup:
+            titles = [
+                title_soup.text.lower().replace(" ", "_").replace("-", "_")
+                for title_soup in metadata_soup.select("th")
+            ]
+            for row in metadata_soup.select("tr:has(td)"):
+                row_dict = {}
+                for index, value in enumerate(row.select("td")):
+                    if value.find("a"):
+
+                        row_dict["topic_name"] = value.find("a").text
+
+                        # Only engage pages need a link
+                        if value.findAll("a", href=True):
+                            if value.find("a")["href"] == value.find("a").text:
+                                value.contents[0] = value.find("a").text
+
+                        else:
+                            metadata_errors.append(
+                                f"Warning: row {index} \"{row_dict['topic_name']}\"\
+                                {titles[index]} contains an error. This Engage\
+                                 page has been skipped."
+                            )
+                            row_dict = None
+                            break
+
+                    # Missing path will cause the engage item in index to not
+                    # link to the corresponding page
+                    # Missing type will cause resource_name to be empty in
+                    # thank-you pages
+                    # This error does not need breaking, because it does not
+                    # break the page
+                    if (
+                        (titles[index] == "path") or (titles[index] == "type")
+                    ) and ((value.text == "") or (value.text is None)):
+                        metadata_errors.append(
+                            f"Warning: row {index} \"{row_dict['topic_name']}\"\
+                            {titles[index]} is missing. This Engage page has \
+                            been skipped."
+                        )
+
+                    row_dict[titles[index]] = "".join(
+                        str(content) for content in value.contents
+                    )
+                if row_dict:
+                    topics_metadata.append(row_dict)
+
+        return topics_metadata, metadata_errors
